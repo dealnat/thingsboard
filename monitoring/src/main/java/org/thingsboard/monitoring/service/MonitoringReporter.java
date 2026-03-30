@@ -48,6 +48,7 @@ public class MonitoringReporter {
     private final NotificationService notificationService;
     private final TbClient tbClient;
     private final MonitoringEntityService entityService;
+    private final MonitoringMetrics monitoringMetrics;
 
     private final Map<String, Latency> latencies = new ConcurrentHashMap<>();
     private final Map<Object, AtomicInteger> failuresCounters = new ConcurrentHashMap<>();
@@ -99,6 +100,7 @@ public class MonitoringReporter {
     }
 
     public void reportLatency(String key, long latencyInNanos) {
+        monitoringMetrics.recordLatency(key, latencyInNanos);
         String latencyKey = key + "Latency";
         double latencyInMs = (double) latencyInNanos / 1000_000;
         log.trace("Reporting latency [{}]: {} ms", key, latencyInMs);
@@ -106,6 +108,7 @@ public class MonitoringReporter {
     }
 
     public void serviceFailure(Object serviceKey, Throwable error) {
+        monitoringMetrics.recordFailure(serviceKey.toString());
         if (log.isDebugEnabled()) {
             log.error("[{}] Error occurred", serviceKey, error);
         }
@@ -118,6 +121,7 @@ public class MonitoringReporter {
     }
 
     public void serviceIsOk(Object serviceKey) {
+        monitoringMetrics.recordSuccess(serviceKey.toString());
         ServiceRecoveryNotification notification = new ServiceRecoveryNotification(serviceKey);
         if (!serviceKey.equals(MonitoredServiceKey.GENERAL)) {
             log.info(notification.getText());

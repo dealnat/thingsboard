@@ -37,7 +37,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-@SpringBootApplication
+@SpringBootApplication(scanBasePackages = {
+        "org.thingsboard.monitoring",
+        "org.thingsboard.server.common.stats"
+})
 @EnableScheduling
 @Slf4j
 @RequiredArgsConstructor

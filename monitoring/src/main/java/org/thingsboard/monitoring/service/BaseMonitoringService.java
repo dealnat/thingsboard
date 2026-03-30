@@ -77,6 +77,8 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
     @Autowired
     private MonitoringReporter reporter;
     @Autowired
+    private MonitoringMetrics monitoringMetrics;
+    @Autowired
     protected ApplicationContext applicationContext;
 
     @Value("${monitoring.edqs.enabled:false}")
@@ -115,6 +117,7 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
         if (healthCheckers.isEmpty()) {
             return;
         }
+        monitoringMetrics.recordCycle();
         try {
             log.info("Starting {}", getName());
             stopWatch.start();
