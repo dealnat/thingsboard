@@ -19,4 +19,8 @@ public interface NotificationChannel {
 
     void sendNotification(String message);
 
+    default void sendNotification(String message, boolean incident) {
+        sendNotification(message);
+    }
+
 }

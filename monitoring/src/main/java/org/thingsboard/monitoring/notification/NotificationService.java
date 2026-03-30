@@ -48,10 +48,11 @@ public class NotificationService {
         } else {
             message = messagePrefix + " " + notification.getText();
         }
+        boolean incident = notification.isIncident();
         return notificationChannels.stream().map(notificationChannel ->
             notificationExecutor.submit(() -> {
                 try {
-                    notificationChannel.sendNotification(message);
+                    notificationChannel.sendNotification(message, incident);
                 } catch (Exception e) {
                     log.error("Failed to send notification to {}", notificationChannel.getClass().getSimpleName(), e);
                 }

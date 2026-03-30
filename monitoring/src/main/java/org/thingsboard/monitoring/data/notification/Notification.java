@@ -19,4 +19,8 @@ public interface Notification {
 
     String getText();
 
+    default boolean isIncident() {
+        return true;
+    }
+
 }

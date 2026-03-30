@@ -51,6 +51,7 @@ public class MonitoringReporter {
 
     private final Map<String, Latency> latencies = new ConcurrentHashMap<>();
     private final Map<Object, AtomicInteger> failuresCounters = new ConcurrentHashMap<>();
+    private final Map<Object, AtomicInteger> nextNotificationAt = new ConcurrentHashMap<>();
 
     @Value("${monitoring.failures_threshold}")
     private int failuresThreshold;
@@ -112,8 +113,14 @@ public class MonitoringReporter {
         int failuresCount = failuresCounters.computeIfAbsent(serviceKey, k -> new AtomicInteger()).incrementAndGet();
         ServiceFailureNotification notification = new ServiceFailureNotification(serviceKey, error, failuresCount);
         log.error(notification.getText());
-        if (failuresCount == failuresThreshold || (repeatedFailureNotification != 0 && failuresCount % repeatedFailureNotification == 0)) {
+        AtomicInteger nextAt = nextNotificationAt.computeIfAbsent(serviceKey, k -> new AtomicInteger(failuresThreshold));
+        if (failuresCount == nextAt.get()) {
             notificationService.sendNotification(notification);
+            if (failuresCount == failuresThreshold) {
+                nextAt.set(failuresThreshold + 2);
+            } else {
+                nextAt.addAndGet(3);
+            }
         }
     }
 
@@ -128,6 +135,7 @@ public class MonitoringReporter {
                 notificationService.sendNotification(notification);
             }
             failuresCounter.set(0);
+            nextNotificationAt.remove(serviceKey);
         }
     }
 

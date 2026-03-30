@@ -16,6 +16,7 @@
 package org.thingsboard.monitoring.notification.channels.impl;
 
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -35,7 +36,23 @@ public class SlackNotificationChannel implements NotificationChannel {
     @Value("${monitoring.notifications.slack.webhook_url}")
     private String webhookUrl;
 
+    @Value("${monitoring.notifications.slack.bot_token:}")
+    private String botToken;
+
+    @Value("${monitoring.notifications.slack.channel_id:}")
+    private String channelId;
+
+    @Value("${monitoring.notifications.slack.incident.enabled:false}")
+    private boolean incidentEnabled;
+
+    @Value("${monitoring.notifications.slack.incident.resolution_timeout_s:60}")
+    private long resolutionTimeoutSeconds;
+
+    @Value("${monitoring.notifications.message_prefix:}")
+    private String messagePrefix;
+
     private RestTemplate restTemplate;
+    private SlackIncidentManager incidentManager;
 
     @PostConstruct
     private void init() {
@@ -43,11 +60,35 @@ public class SlackNotificationChannel implements NotificationChannel {
                 .setConnectTimeout(Duration.ofSeconds(5))
                 .setReadTimeout(Duration.ofSeconds(2))
                 .build();
+
+        if (incidentEnabled) {
+            SlackApiClient apiClient = new SlackApiClient(botToken);
+            incidentManager = new SlackIncidentManager(apiClient, channelId, resolutionTimeoutSeconds, messagePrefix);
+            log.info("Slack incident mode enabled (channel: {}, resolution timeout: {}s)", channelId, resolutionTimeoutSeconds);
+        }
     }
 
     @Override
     public void sendNotification(String message) {
-        restTemplate.postForObject(webhookUrl, Map.of("text", message), String.class);
+        sendNotification(message, true);
+    }
+
+    @Override
+    public void sendNotification(String message, boolean incident) {
+        if (incidentManager != null && incident) {
+            incidentManager.sendAlert(message);
+        } else if (incidentManager != null) {
+            incidentManager.sendDirectMessage(message);
+        } else {
+            restTemplate.postForObject(webhookUrl, Map.of("text", message), String.class);
+        }
+    }
+
+    @PreDestroy
+    private void destroy() {
+        if (incidentManager != null) {
+            incidentManager.shutdown();
+        }
     }
 
 }
