@@ -19,7 +19,9 @@ import com.slack.api.Slack;
 import com.slack.api.methods.MethodsClient;
 import com.slack.api.methods.SlackApiTextResponse;
 import com.slack.api.methods.request.chat.ChatPostMessageRequest;
+import com.slack.api.methods.request.chat.ChatUpdateRequest;
 import com.slack.api.methods.response.chat.ChatPostMessageResponse;
+import com.slack.api.methods.response.chat.ChatUpdateResponse;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
@@ -49,6 +51,22 @@ public class SlackApiClient {
                 .build();
         ChatPostMessageResponse response = sendRequest(request);
         return response.getTs();
+    }
+
+    public void updateMessage(String channelId, String ts, String text) {
+        ChatUpdateRequest request = ChatUpdateRequest.builder()
+                .channel(channelId)
+                .ts(ts)
+                .text(text)
+                .build();
+        MethodsClient client = slack.methods(botToken);
+        ChatUpdateResponse response;
+        try {
+            response = client.chatUpdate(request);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to update Slack message: " + e.getMessage(), e);
+        }
+        checkResponse(response);
     }
 
     private ChatPostMessageResponse sendRequest(ChatPostMessageRequest request) {

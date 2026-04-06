@@ -48,6 +48,9 @@ public class SlackNotificationChannel implements NotificationChannel {
     @Value("${monitoring.notifications.slack.incident.resolution_timeout_s:60}")
     private long resolutionTimeoutSeconds;
 
+    @Value("${monitoring.notifications.slack.incident.tag_channel:false}")
+    private boolean tagChannel;
+
     @Value("${monitoring.notifications.message_prefix:}")
     private String messagePrefix;
 
@@ -63,7 +66,7 @@ public class SlackNotificationChannel implements NotificationChannel {
 
         if (incidentEnabled) {
             SlackApiClient apiClient = new SlackApiClient(botToken);
-            incidentManager = new SlackIncidentManager(apiClient, channelId, resolutionTimeoutSeconds, messagePrefix);
+            incidentManager = new SlackIncidentManager(apiClient, channelId, resolutionTimeoutSeconds, messagePrefix, tagChannel);
             log.info("Slack incident mode enabled (channel: {}, resolution timeout: {}s)", channelId, resolutionTimeoutSeconds);
         }
     }

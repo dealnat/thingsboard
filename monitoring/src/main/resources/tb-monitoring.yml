@@ -134,7 +134,9 @@ monitoring:
         # Enable incident grouping (threads alerts into incidents, auto-resolves after timeout)
         enabled: '${SLACK_INCIDENT_ENABLED:false}'
         # Incident resolution timeout in seconds
-        resolution_timeout_s: '${SLACK_INCIDENT_RESOLUTION_TIMEOUT_S:60}'
+        resolution_timeout_s: '${SLACK_INCIDENT_RESOLUTION_TIMEOUT_S:90}'
+        # Tag @channel in incident messages
+        tag_channel: '${SLACK_INCIDENT_TAG_CHANNEL:true}'
 
   latency:
     # Enable latencies reporting
