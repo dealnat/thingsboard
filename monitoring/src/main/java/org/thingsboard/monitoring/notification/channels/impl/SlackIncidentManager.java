@@ -17,6 +17,7 @@ package org.thingsboard.monitoring.notification.channels.impl;
 
 import lombok.extern.slf4j.Slf4j;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -44,32 +45,18 @@ public class SlackIncidentManager {
 
     private static final Pattern BOLD_SERVICE_PATTERN = Pattern.compile("\\*([^*]+)\\*\\s*\\(");
     private static final Pattern LATENCY_KEY_PATTERN = Pattern.compile("\\[([^\\]]+Latency)]");
-    private static final Pattern PLAIN_SERVICE_PATTERN = Pattern.compile("(?:^|\\s)(\\S+)\\s+-\\s+Failure:");
+    private static final Pattern PLAIN_SERVICE_PATTERN = Pattern.compile("(.+?)\\s+-\\s+Failure:");
+    private static final Pattern PLAIN_RECOVERY_PATTERN = Pattern.compile("(.+?)\\s+is\\s+OK");
+    private static final Pattern FAILURE_COUNT_PATTERN = Pattern.compile("number of subsequent failures:\\s*(\\d+)");
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z")
             .withZone(ZoneId.systemDefault());
-    private static final Map<String, String> SERVICE_EMOJI = new LinkedHashMap<>();
-
-    static {
-        // Transport failures
-        SERVICE_EMOJI.put("MQTT", ":x:");
-        SERVICE_EMOJI.put("CoAP", ":x:");
-        SERVICE_EMOJI.put("HTTP", ":x:");
-        SERVICE_EMOJI.put("LwM2M", ":x:");
-        SERVICE_EMOJI.put("EDQS", ":x:");
-        // General (WS/login) failures
-        SERVICE_EMOJI.put("Monitoring", ":red_circle:");
-        // Latency keys
-        SERVICE_EMOJI.put("wsConnectLatency", ":hourglass_flowing_sand:");
-        SERVICE_EMOJI.put("wsSubscribeLatency", ":hourglass_flowing_sand:");
-        SERVICE_EMOJI.put("logInLatency", ":hourglass_flowing_sand:");
-        SERVICE_EMOJI.put("edqsQueryLatency", ":hourglass_flowing_sand:");
-    }
-
     private String activeIncidentThreadTs;
     private ScheduledFuture<?> resolutionTask;
+    private ScheduledFuture<?> durationUpdateTask;
     private Instant incidentStartTime;
     private Instant lastAlertTime;
-    private final Set<String> affectedServices = new LinkedHashSet<>();
+    private final Map<String, Integer> failingServices = new LinkedHashMap<>();
+    private final Set<String> recoveredServices = new LinkedHashSet<>();
 
     public SlackIncidentManager(SlackApiClient slackApiClient, String channelId,
                                 long resolutionTimeoutSeconds, String messagePrefix, boolean tagChannel) {
@@ -86,16 +73,41 @@ public class SlackIncidentManager {
     }
 
     public synchronized void sendAlert(String message) {
+        boolean isRecovery = message.contains("is OK");
+        Set<String> serviceNames = extractServiceNames(message);
+
         if (activeIncidentThreadTs == null) {
+            if (isRecovery) {
+                return;
+            }
             incidentStartTime = Instant.now();
-            affectedServices.clear();
-            affectedServices.addAll(extractServiceNames(message));
+            failingServices.clear();
+            recoveredServices.clear();
+            int failureCount = extractFailureCount(message);
+            serviceNames.forEach(name -> failingServices.put(name, failureCount));
             String incidentHeader = buildIncidentMessage();
             String ts = slackApiClient.postMessage(channelId, incidentHeader);
             activeIncidentThreadTs = ts;
+            startDurationUpdater();
             log.info("New incident created, thread ts: {}", ts);
         } else {
-            if (affectedServices.addAll(extractServiceNames(message))) {
+            boolean changed = false;
+            if (isRecovery) {
+                for (String name : serviceNames) {
+                    if (failingServices.remove(name) != null) {
+                        recoveredServices.add(name);
+                        changed = true;
+                    }
+                }
+            } else {
+                int failureCount = extractFailureCount(message);
+                for (String name : serviceNames) {
+                    recoveredServices.remove(name);
+                    failingServices.put(name, failureCount);
+                    changed = true;
+                }
+            }
+            if (changed) {
                 updateIncidentMessage();
             }
         }
@@ -105,7 +117,7 @@ public class SlackIncidentManager {
         resetResolutionTimer();
     }
 
-    private String buildIncidentMessage() {
+    private String buildOngoingMessageText() {
         StringBuilder sb = new StringBuilder();
         if (tagChannel) {
             sb.append("<!channel> ");
@@ -113,27 +125,25 @@ public class SlackIncidentManager {
         if (messagePrefix != null && !messagePrefix.isEmpty()) {
             sb.append("*").append(messagePrefix).append("*");
         }
-        sb.append(" :rotating_light: Ongoing incident\n");
-        if (!affectedServices.isEmpty()) {
-            sb.append("Affected: ").append(formatAffectedServices());
+        sb.append(" :rotating_light: ");
+        Duration elapsed = Duration.between(incidentStartTime, Instant.now());
+        if (elapsed.toMinutes() >= 1) {
+            sb.append(" (").append(formatDuration(elapsed)).append(")");
+        }
+        sb.append(" | ");
+        if (!failingServices.isEmpty() || !recoveredServices.isEmpty()) {
+            sb.append(formatAffectedServices());
         }
         return sb.toString();
     }
 
+    private String buildIncidentMessage() {
+        return buildOngoingMessageText();
+    }
+
     private void updateIncidentMessage() {
         try {
-            StringBuilder sb = new StringBuilder();
-            if (tagChannel) {
-                sb.append("<!channel> ");
-            }
-            if (messagePrefix != null && !messagePrefix.isEmpty()) {
-                sb.append("*").append(messagePrefix).append("*");
-            }
-            sb.append(" :rotating_light: Ongoing incident\n");
-            if (!affectedServices.isEmpty()) {
-                sb.append("Affected: ").append(formatAffectedServices());
-            }
-            slackApiClient.updateMessage(channelId, activeIncidentThreadTs, sb.toString());
+            slackApiClient.updateMessage(channelId, activeIncidentThreadTs, buildOngoingMessageText());
         } catch (Exception e) {
             log.error("Failed to update incident message", e);
         }
@@ -146,19 +156,52 @@ public class SlackIncidentManager {
         resolutionTask = scheduler.schedule(this::resolveIncident, resolutionTimeoutSeconds, TimeUnit.SECONDS);
     }
 
+    private void startDurationUpdater() {
+        if (durationUpdateTask != null) {
+            durationUpdateTask.cancel(false);
+        }
+        durationUpdateTask = scheduler.scheduleAtFixedRate(this::updateDuration, 60, 60, TimeUnit.SECONDS);
+    }
+
+    private synchronized void updateDuration() {
+        if (activeIncidentThreadTs != null) {
+            updateIncidentMessage();
+        }
+    }
+
+    private void stopDurationUpdater() {
+        if (durationUpdateTask != null) {
+            durationUpdateTask.cancel(false);
+            durationUpdateTask = null;
+        }
+    }
+
+    static String formatDuration(Duration duration) {
+        long totalMinutes = duration.toMinutes();
+        if (totalMinutes < 1) {
+            return "<1m";
+        } else if (totalMinutes < 60) {
+            return totalMinutes + "m";
+        } else {
+            long hours = totalMinutes / 60;
+            long minutes = totalMinutes % 60;
+            return minutes > 0 ? hours + "h" + minutes + "m" : hours + "h";
+        }
+    }
+
     private synchronized void resolveIncident() {
         if (activeIncidentThreadTs != null) {
+            stopDurationUpdater();
             try {
-                // Update incident message with resolve time
+                Duration totalDuration = Duration.between(incidentStartTime, lastAlertTime);
                 StringBuilder sb = new StringBuilder();
                 if (messagePrefix != null && !messagePrefix.isEmpty()) {
                     sb.append("*").append(messagePrefix).append("*");
                 }
-                sb.append(" :white_check_mark: Incident resolved at: ");
-                sb.append(TIME_FORMATTER.format(lastAlertTime));
-                sb.append("\n");
-                if (!affectedServices.isEmpty()) {
-                    sb.append("Affected: ").append(formatAffectedServices()).append("\n");
+                sb.append(" :white_check_mark:");
+                sb.append(" (").append(formatDuration(totalDuration)).append(") | ");
+                if (!failingServices.isEmpty() || !recoveredServices.isEmpty()) {
+                    sb.append(formatAffectedServices()).append("\n");
                 }
                 slackApiClient.updateMessage(channelId, activeIncidentThreadTs, sb.toString());
                 log.info("Incident resolved (thread was {})", activeIncidentThreadTs);
@@ -167,34 +210,40 @@ public class SlackIncidentManager {
             }
             activeIncidentThreadTs = null;
             resolutionTask = null;
-            affectedServices.clear();
+            failingServices.clear();
+            recoveredServices.clear();
         }
     }
 
     private String formatAffectedServices() {
-        return affectedServices.stream()
-                .map(name -> {
-                    String emoji = SERVICE_EMOJI.get(name);
-                    if (emoji == null) {
-                        // Fallback for dynamic latency keys like mqttTransportRequestLatency
-                        if (name.contains("Latency")) {
-                            emoji = ":hourglass_flowing_sand:";
-                        } else {
-                            emoji = ":small_blue_diamond:";
-                        }
-                    }
-                    return emoji + " " + name;
-                })
-                .collect(Collectors.joining(", "));
+        StringBuilder sb = new StringBuilder();
+        boolean first = true;
+        for (Map.Entry<String, Integer> entry : failingServices.entrySet()) {
+            if (!first) sb.append(", ");
+            String emoji = entry.getKey().contains("Latency") ? ":large_yellow_circle:" : ":red_circle:";
+            sb.append(emoji).append(" ").append(entry.getKey()).append(" (").append(entry.getValue()).append(")");
+            first = false;
+        }
+        for (String name : recoveredServices) {
+            if (!first) sb.append(", ");
+            sb.append(":large_green_circle: ").append(name);
+            first = false;
+        }
+        return sb.toString();
     }
 
-    static Set<String> extractServiceNames(String message) {
-        // Recovery messages should not contribute to affected services
-        if (message.contains("is OK")) {
-            return new LinkedHashSet<>();
+    static int extractFailureCount(String message) {
+
+        Matcher matcher = FAILURE_COUNT_PATTERN.matcher(message);
+        if (matcher.find()) {
+            return Integer.parseInt(matcher.group(1));
         }
+        return 1;
+    }
+
+    Set<String> extractServiceNames(String message) {
         Set<String> names = new LinkedHashSet<>();
-        // Failure/Recovery: *CoAP* (coap://...) - bold service name followed by URL
+        // Transport messages: *CoAP* (coap://...) - bold service name followed by URL
         Matcher boldMatcher = BOLD_SERVICE_PATTERN.matcher(message);
         if (boldMatcher.find()) {
             names.add(boldMatcher.group(1));
@@ -208,15 +257,32 @@ public class SlackIncidentManager {
         if (!names.isEmpty()) {
             return names;
         }
-        // Fallback: plain service name before " - Failure:"
+        // Plain failure: "WS Connect - Failure: ..."
         Matcher plainMatcher = PLAIN_SERVICE_PATTERN.matcher(message);
         if (plainMatcher.find()) {
-            String name = plainMatcher.group(1);
-            if (name != null) {
+            String name = stripPrefix(plainMatcher.group(1));
+            if (!name.isEmpty()) {
+                names.add(name);
+                return names;
+            }
+        }
+        // Plain recovery: "Login is OK"
+        Matcher recoveryMatcher = PLAIN_RECOVERY_PATTERN.matcher(message);
+        if (recoveryMatcher.find()) {
+            String name = stripPrefix(recoveryMatcher.group(1));
+            if (!name.isEmpty()) {
                 names.add(name);
             }
         }
         return names;
+    }
+
+    private String stripPrefix(String name) {
+        name = name.trim();
+        if (messagePrefix != null && !messagePrefix.isEmpty() && name.startsWith(messagePrefix)) {
+            name = name.substring(messagePrefix.length()).trim();
+        }
+        return name;
     }
 
     public void sendDirectMessage(String message) {

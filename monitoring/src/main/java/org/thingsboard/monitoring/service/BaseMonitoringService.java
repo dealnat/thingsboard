@@ -117,14 +117,37 @@ public abstract class BaseMonitoringService<C extends MonitoringConfig<T>, T ext
         }
         try {
             log.info("Starting {}", getName());
-            stopWatch.start();
-            String accessToken = tbClient.logIn();
-            reporter.reportLatency(Latencies.LOG_IN, stopWatch.getTime());
 
-            try (WsClient wsClient = wsClientFactory.createClient(accessToken)) {
+            String accessToken;
+            try {
                 stopWatch.start();
-                wsClient.subscribeForTelemetry(devices, getTestTelemetryKeys()).waitForReply();
-                reporter.reportLatency(Latencies.WS_SUBSCRIBE, stopWatch.getTime());
+                accessToken = tbClient.logIn();
+                reporter.reportLatency(Latencies.LOG_IN, stopWatch.getTime());
+                reporter.serviceIsOk(MonitoredServiceKey.LOGIN);
+            } catch (Throwable e) {
+                reporter.serviceFailure(MonitoredServiceKey.LOGIN, e);
+                return;
+            }
+
+            WsClient wsClient;
+            try {
+                wsClient = wsClientFactory.createClient(accessToken);
+                reporter.serviceIsOk(MonitoredServiceKey.WS_CONNECT);
+            } catch (Throwable e) {
+                reporter.serviceFailure(MonitoredServiceKey.WS_CONNECT, e);
+                return;
+            }
+
+            try (wsClient) {
+                try {
+                    stopWatch.start();
+                    wsClient.subscribeForTelemetry(devices, getTestTelemetryKeys()).waitForReply();
+                    reporter.reportLatency(Latencies.WS_SUBSCRIBE, stopWatch.getTime());
+                    reporter.serviceIsOk(MonitoredServiceKey.WS_SUBSCRIBE);
+                } catch (Throwable e) {
+                    reporter.serviceFailure(MonitoredServiceKey.WS_SUBSCRIBE, e);
+                    return;
+                }
 
                 for (BaseHealthChecker<C, T> healthChecker : healthCheckers) {
                     check(healthChecker, wsClient);
