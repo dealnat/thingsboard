@@ -20,7 +20,9 @@ import lombok.extern.slf4j.Slf4j;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -28,6 +30,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @Slf4j
 public class SlackIncidentManager {
@@ -44,6 +47,23 @@ public class SlackIncidentManager {
     private static final Pattern PLAIN_SERVICE_PATTERN = Pattern.compile("(?:^|\\s)(\\S+)\\s+-\\s+Failure:");
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z")
             .withZone(ZoneId.systemDefault());
+    private static final Map<String, String> SERVICE_EMOJI = new LinkedHashMap<>();
+
+    static {
+        // Transport failures
+        SERVICE_EMOJI.put("MQTT", ":x:");
+        SERVICE_EMOJI.put("CoAP", ":x:");
+        SERVICE_EMOJI.put("HTTP", ":x:");
+        SERVICE_EMOJI.put("LwM2M", ":x:");
+        SERVICE_EMOJI.put("EDQS", ":x:");
+        // General (WS/login) failures
+        SERVICE_EMOJI.put("Monitoring", ":red_circle:");
+        // Latency keys
+        SERVICE_EMOJI.put("wsConnectLatency", ":hourglass_flowing_sand:");
+        SERVICE_EMOJI.put("wsSubscribeLatency", ":hourglass_flowing_sand:");
+        SERVICE_EMOJI.put("logInLatency", ":hourglass_flowing_sand:");
+        SERVICE_EMOJI.put("edqsQueryLatency", ":hourglass_flowing_sand:");
+    }
 
     private String activeIncidentThreadTs;
     private ScheduledFuture<?> resolutionTask;
@@ -95,7 +115,7 @@ public class SlackIncidentManager {
         }
         sb.append(" :rotating_light: Ongoing incident\n");
         if (!affectedServices.isEmpty()) {
-            sb.append("Affected: ").append(String.join(", ", affectedServices));
+            sb.append("Affected: ").append(formatAffectedServices());
         }
         return sb.toString();
     }
@@ -111,7 +131,7 @@ public class SlackIncidentManager {
             }
             sb.append(" :rotating_light: Ongoing incident\n");
             if (!affectedServices.isEmpty()) {
-                sb.append("Affected: ").append(String.join(", ", affectedServices));
+                sb.append("Affected: ").append(formatAffectedServices());
             }
             slackApiClient.updateMessage(channelId, activeIncidentThreadTs, sb.toString());
         } catch (Exception e) {
@@ -134,11 +154,11 @@ public class SlackIncidentManager {
                 if (messagePrefix != null && !messagePrefix.isEmpty()) {
                     sb.append("*").append(messagePrefix).append("*");
                 }
-                sb.append(":white_check_mark: Incident resolved at: ");
+                sb.append(" :white_check_mark: Incident resolved at: ");
                 sb.append(TIME_FORMATTER.format(lastAlertTime));
                 sb.append("\n");
                 if (!affectedServices.isEmpty()) {
-                    sb.append("Affected: ").append(String.join(", ", affectedServices)).append("\n");
+                    sb.append("Affected: ").append(formatAffectedServices()).append("\n");
                 }
                 slackApiClient.updateMessage(channelId, activeIncidentThreadTs, sb.toString());
                 log.info("Incident resolved (thread was {})", activeIncidentThreadTs);
@@ -149,6 +169,23 @@ public class SlackIncidentManager {
             resolutionTask = null;
             affectedServices.clear();
         }
+    }
+
+    private String formatAffectedServices() {
+        return affectedServices.stream()
+                .map(name -> {
+                    String emoji = SERVICE_EMOJI.get(name);
+                    if (emoji == null) {
+                        // Fallback for dynamic latency keys like mqttTransportRequestLatency
+                        if (name.contains("Latency")) {
+                            emoji = ":hourglass_flowing_sand:";
+                        } else {
+                            emoji = ":small_blue_diamond:";
+                        }
+                    }
+                    return emoji + " " + name;
+                })
+                .collect(Collectors.joining(", "));
     }
 
     static Set<String> extractServiceNames(String message) {
