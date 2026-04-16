@@ -55,19 +55,24 @@ public class SlackNotificationChannel implements NotificationChannel {
     private String messagePrefix;
 
     private RestTemplate restTemplate;
+    private SlackApiClient slackApiClient;
     private SlackIncidentManager incidentManager;
 
     @PostConstruct
     private void init() {
-        restTemplate = new RestTemplateBuilder()
-                .setConnectTimeout(Duration.ofSeconds(5))
-                .setReadTimeout(Duration.ofSeconds(2))
-                .build();
-
-        if (incidentEnabled) {
-            SlackApiClient apiClient = new SlackApiClient(botToken);
-            incidentManager = new SlackIncidentManager(apiClient, channelId, resolutionTimeoutSeconds, messagePrefix, tagChannel);
-            log.info("Slack incident mode enabled (channel: {}, resolution timeout: {}s)", channelId, resolutionTimeoutSeconds);
+        if (botToken != null && !botToken.isEmpty() && channelId != null && !channelId.isEmpty()) {
+            slackApiClient = new SlackApiClient(botToken);
+            log.info("Slack API mode enabled (channel: {})", channelId);
+            if (incidentEnabled) {
+                incidentManager = new SlackIncidentManager(slackApiClient, channelId, resolutionTimeoutSeconds, messagePrefix, tagChannel);
+                log.info("Slack incident grouping enabled (resolution timeout: {}s)", resolutionTimeoutSeconds);
+            }
+        } else {
+            restTemplate = new RestTemplateBuilder()
+                    .setConnectTimeout(Duration.ofSeconds(5))
+                    .setReadTimeout(Duration.ofSeconds(2))
+                    .build();
+            log.info("Slack webhook mode enabled");
         }
     }
 
@@ -80,8 +85,8 @@ public class SlackNotificationChannel implements NotificationChannel {
     public void sendNotification(String message, boolean incident) {
         if (incidentManager != null && incident) {
             incidentManager.sendAlert(message);
-        } else if (incidentManager != null) {
-            incidentManager.sendDirectMessage(message);
+        } else if (slackApiClient != null) {
+            slackApiClient.postMessage(channelId, message);
         } else {
             restTemplate.postForObject(webhookUrl, Map.of("text", message), String.class);
         }

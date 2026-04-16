@@ -48,6 +48,7 @@ public class SlackIncidentManager {
     private String activeIncidentThreadTs;
     private ScheduledFuture<?> resolutionTask;
     private Instant incidentStartTime;
+    private Instant lastAlertTime;
     private final Set<String> affectedServices = new LinkedHashSet<>();
 
     public SlackIncidentManager(SlackApiClient slackApiClient, String channelId,
@@ -79,6 +80,7 @@ public class SlackIncidentManager {
             }
         }
         slackApiClient.postThreadReply(channelId, activeIncidentThreadTs, message);
+        lastAlertTime = Instant.now();
         log.debug("Alert added to incident thread {}", activeIncidentThreadTs);
         resetResolutionTimer();
     }
@@ -88,14 +90,12 @@ public class SlackIncidentManager {
         if (tagChannel) {
             sb.append("<!channel> ");
         }
-        sb.append(":rotating_light: *Incident occurred");
         if (messagePrefix != null && !messagePrefix.isEmpty()) {
-            sb.append(": ").append(messagePrefix);
+            sb.append("*").append(messagePrefix).append("*");
         }
-        sb.append("*\n");
-        sb.append("Started: ").append(TIME_FORMATTER.format(incidentStartTime));
+        sb.append(" :rotating_light: Ongoing incident\n");
         if (!affectedServices.isEmpty()) {
-            sb.append("\nAffected: ").append(String.join(", ", affectedServices));
+            sb.append("Affected: ").append(String.join(", ", affectedServices));
         }
         return sb.toString();
     }
@@ -106,14 +106,12 @@ public class SlackIncidentManager {
             if (tagChannel) {
                 sb.append("<!channel> ");
             }
-            sb.append(":rotating_light: *Incident occurred");
             if (messagePrefix != null && !messagePrefix.isEmpty()) {
-                sb.append(": ").append(messagePrefix);
+                sb.append("*").append(messagePrefix).append("*");
             }
-            sb.append("*\n");
-            sb.append("Started: ").append(TIME_FORMATTER.format(incidentStartTime));
+            sb.append(" :rotating_light: Ongoing incident\n");
             if (!affectedServices.isEmpty()) {
-                sb.append("\nAffected: ").append(String.join(", ", affectedServices));
+                sb.append("Affected: ").append(String.join(", ", affectedServices));
             }
             slackApiClient.updateMessage(channelId, activeIncidentThreadTs, sb.toString());
         } catch (Exception e) {
@@ -133,16 +131,15 @@ public class SlackIncidentManager {
             try {
                 // Update incident message with resolve time
                 StringBuilder sb = new StringBuilder();
-                sb.append(":white_check_mark: *Incident resolved");
                 if (messagePrefix != null && !messagePrefix.isEmpty()) {
-                    sb.append(": ").append(messagePrefix);
+                    sb.append("*").append(messagePrefix).append("*");
                 }
-                sb.append("*\n");
-                sb.append("Started: ").append(TIME_FORMATTER.format(incidentStartTime)).append("\n");
+                sb.append(":white_check_mark: Incident resolved at: ");
+                sb.append(TIME_FORMATTER.format(lastAlertTime));
+                sb.append("\n");
                 if (!affectedServices.isEmpty()) {
                     sb.append("Affected: ").append(String.join(", ", affectedServices)).append("\n");
                 }
-                sb.append("Resolved: ").append(TIME_FORMATTER.format(Instant.now()));
                 slackApiClient.updateMessage(channelId, activeIncidentThreadTs, sb.toString());
                 log.info("Incident resolved (thread was {})", activeIncidentThreadTs);
             } catch (Exception e) {
