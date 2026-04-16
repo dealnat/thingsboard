@@ -48,8 +48,6 @@ public class SlackIncidentManager {
     private static final Pattern PLAIN_SERVICE_PATTERN = Pattern.compile("(.+?)\\s+-\\s+Failure:");
     private static final Pattern PLAIN_RECOVERY_PATTERN = Pattern.compile("(.+?)\\s+is\\s+OK");
     private static final Pattern FAILURE_COUNT_PATTERN = Pattern.compile("number of subsequent failures:\\s*(\\d+)");
-    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z")
-            .withZone(ZoneId.systemDefault());
     private String activeIncidentThreadTs;
     private ScheduledFuture<?> resolutionTask;
     private ScheduledFuture<?> durationUpdateTask;
