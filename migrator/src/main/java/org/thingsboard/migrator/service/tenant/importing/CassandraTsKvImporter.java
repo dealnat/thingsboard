@@ -10,11 +10,12 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Service;
 import org.thingsboard.migrator.MigrationService;
-import org.thingsboard.migrator.service.tenant.exporting.CassandraTsKvExporter;
 import org.thingsboard.migrator.utils.CassandraService;
 import org.thingsboard.migrator.utils.Storage;
+import org.thingsboard.migrator.utils.TsKvFiles;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -45,18 +46,34 @@ public class CassandraTsKvImporter extends MigrationService {
     @Override
     protected void start() throws Exception {
         log.info("Starting CassandraTsKvImporter...");
-        log.info("Reporting info for file: {}", storage.getFileInfo(CassandraTsKvExporter.TS_KV_FILE));
+        List<TsKvFiles.Part> parts = TsKvFiles.listForImport(storage);
+        if (parts.stream().allMatch(part -> part.rows() != null)) {
+            long totalRows = parts.stream().mapToLong(TsKvFiles.Part::rows).sum();
+            log.info("Importing {} time-series files with {} rows in total", parts.size(), totalRows);
+            reportTotal(TS_KV_TABLE, totalRows);
+        }
         if (tsKvSkipLines > 0) {
             log.info("Skipping first {} lines. Initial processed counter will start from {}...", tsKvSkipLines, tsKvSkipLines);
             reportProcessed(TS_KV_TABLE, tsKvSkipLines, null);
         }
-        storage.readAndProcess(CassandraTsKvExporter.TS_KV_FILE, tsKvSkipLines, row -> {
-            try {
-                saveTsKv(row);
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to save row: " + row, e);
+        // skip_lines counts across all files in order, like the processed counter
+        long toSkip = tsKvSkipLines;
+        for (TsKvFiles.Part part : parts) {
+            if (part.rows() != null && toSkip >= part.rows()) {
+                log.info("Skipping file {} ({} rows)", part.name(), part.rows());
+                toSkip -= part.rows();
+                continue;
             }
-        });
+            log.info("Importing {}", storage.getFileInfo(part.name()));
+            storage.readAndProcess(part.name(), toSkip, row -> {
+                try {
+                    saveTsKv(row);
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to save row: " + row, e);
+                }
+            });
+            toSkip = 0;
+        }
     }
 
     private void saveTsKv(Map<String, Object> row) {

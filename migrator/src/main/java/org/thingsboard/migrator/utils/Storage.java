@@ -36,6 +36,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -85,6 +87,10 @@ public class Storage {
 
     @SneakyThrows
     public void addToFile(Writer writer, Map<String, Object> row) {
+        writer.write(toLine(row));
+    }
+
+    public String toLine(Map<String, Object> row) {
         row.replaceAll((column, data) -> {
             if (data instanceof PGobject object) {
                 data = object.getValue();
@@ -101,8 +107,31 @@ public class Storage {
             }
             return data;
         });
-        String serialized = toJson(row);
-        writer.write(serialized + System.lineSeparator());
+        return toJson(row) + System.lineSeparator();
+    }
+
+    public boolean exists(String file) {
+        return Files.exists(getPath(file));
+    }
+
+    public long size(String file) throws IOException {
+        return Files.size(getPath(file));
+    }
+
+    public void delete(String file) throws IOException {
+        Files.deleteIfExists(getPath(file));
+    }
+
+    // Names without the .gz extension, sorted
+    public List<String> listFiles(Pattern namePattern) throws IOException {
+        try (Stream<Path> files = Files.list(workingDir)) {
+            return files.map(path -> path.getFileName().toString())
+                    .filter(name -> name.endsWith(".gz"))
+                    .map(name -> name.substring(0, name.length() - ".gz".length()))
+                    .filter(name -> namePattern.matcher(name).matches())
+                    .sorted()
+                    .toList();
+        }
     }
 
     public long count(String file) throws IOException {

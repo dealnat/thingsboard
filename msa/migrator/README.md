@@ -21,6 +21,8 @@ CASSANDRA_LOCAL_DATACENTER=datacenter1
 
 PARALLELISM_LEVEL=4
 ```
+For a PostgreSQL-only (or TimescaleDB) source, set `CASSANDRA_EXPORT_ENABLED=false` and `POSTGRES_TS_EXPORT_ENABLED=true` to export timeseries history from PostgreSQL `ts_kv` (see `migrator/src/main/resources/README.md`).
+Timeseries history is split into files of about `TS_KV_EXPORT_MAX_FILE_SIZE_MB` (default 256); `0` writes a single `ts_kv.gz` like older versions.
 
 Example of `migrator.env` for tenant import:
 ```

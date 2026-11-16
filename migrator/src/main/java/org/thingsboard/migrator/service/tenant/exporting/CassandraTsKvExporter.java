@@ -14,8 +14,9 @@ import org.thingsboard.migrator.MigrationService;
 import org.thingsboard.migrator.Table;
 import org.thingsboard.migrator.utils.CassandraService;
 import org.thingsboard.migrator.utils.Storage;
+import org.thingsboard.migrator.utils.TsKvWriter;
 
-import java.io.Writer;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -41,13 +42,14 @@ public class CassandraTsKvExporter extends MigrationService {
     private long partitionSizeMs;
     @Value("${export.cassandra.ts.order.ts:false}")
     private boolean orderByTimestamp;
+    @Value("${export.ts_kv.max_file_size_mb}")
+    private long maxFileSizeMb;
 
     public static final String TS_KV_TABLE = "ts_kv_cf";
     public static final String TS_KV_PARTITIONS_TABLE = "ts_kv_partitions_cf";
-    public static final String TS_KV_FILE = "ts_kv";
     public static final String LATEST_KV = Table.LATEST_KV.getName();
 
-    private Writer writer;
+    private TsKvWriter writer;
 
     private boolean isFilterByPartition() {
         return partitionFilter != null && partitionFilter > 0;
@@ -68,8 +70,7 @@ public class CassandraTsKvExporter extends MigrationService {
             }
         }
 
-        storage.newFile(TS_KV_FILE);
-        writer = storage.newWriter(TS_KV_FILE);
+        writer = new TsKvWriter(storage, maxFileSizeMb * 1024 * 1024);
 
         log.info("Starting Cassandra TS export. Latest KV file info: {}", storage.getFileInfo(LATEST_KV));
         storage.readAndProcess(LATEST_KV, latestKvRow -> {
@@ -84,7 +85,7 @@ public class CassandraTsKvExporter extends MigrationService {
         });
     }
 
-    private void getTsHistoryAndSave(Map<String, Object> latestKvRow) {
+    private void getTsHistoryAndSave(Map<String, Object> latestKvRow) throws IOException {
         String entityType = (String) latestKvRow.get("table_name");
         UUID entityId = (UUID) latestKvRow.get("entity_id");
         String key = (String) latestKvRow.get("key_name");
@@ -153,7 +154,7 @@ public class CassandraTsKvExporter extends MigrationService {
                     }
                     data.put(column, value);
                 }
-                storage.addToFile(writer, data);
+                writer.write(data);
                 reportProcessed(TS_KV_TABLE, data);
             }
         }
@@ -163,7 +164,7 @@ public class CassandraTsKvExporter extends MigrationService {
     protected void afterFinished() throws Exception {
         finishedProcessing(TS_KV_TABLE);
         finishedProcessing(LATEST_KV);
-        writer.close();
+        writer.finish();
     }
 
 }
