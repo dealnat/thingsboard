@@ -21,6 +21,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static java.lang.String.format;
 import static org.thingsboard.migrator.service.tenant.exporting.CassandraTsKvExporter.TS_KV_PARTITIONS_TABLE;
@@ -36,6 +37,12 @@ public class CassandraTsKvImporter extends MigrationService {
     private final CassandraService cassandraService;
 
     private final Map<PartitionKey, Set<Long>> partitions = new WeakHashMap<>();
+
+    // Position of a row counts rows across all files, like skip_lines
+    private long nextPosition;
+    private final AtomicLong failedInserts = new AtomicLong();
+    // Once the executor is done, every row before this position is imported
+    private final AtomicLong firstFailedPosition = new AtomicLong(Long.MAX_VALUE);
 
     @Value("${import.cassandra.ttl_days:730}")
     private int tsKvTtlDays;
@@ -58,25 +65,40 @@ public class CassandraTsKvImporter extends MigrationService {
         }
         // skip_lines counts across all files in order, like the processed counter
         long toSkip = tsKvSkipLines;
+        nextPosition = tsKvSkipLines;
         for (TsKvFiles.Part part : parts) {
+            if (failedInserts.get() > 0) {
+                break;
+            }
             if (part.rows() != null && toSkip >= part.rows()) {
                 log.info("Skipping file {} ({} rows)", part.name(), part.rows());
                 toSkip -= part.rows();
                 continue;
             }
             log.info("Importing {}", storage.getFileInfo(part.name()));
-            storage.readAndProcess(part.name(), toSkip, row -> {
-                try {
-                    saveTsKv(row);
-                } catch (Exception e) {
-                    throw new RuntimeException("Failed to save row: " + row, e);
-                }
-            });
+            try {
+                storage.readAndProcess(part.name(), toSkip, row -> {
+                    long position = nextPosition++;
+                    // after a failure the rest is imported on resume
+                    if (failedInserts.get() > 0) {
+                        return;
+                    }
+                    try {
+                        saveTsKv(row, position);
+                    } catch (Throwable e) {
+                        onFailure(position, row, e);
+                    }
+                });
+            } catch (Exception e) {
+                // e.g. a truncated file; rows already submitted still complete
+                onFailure(nextPosition, "file " + part.name(), e);
+                break;
+            }
             toSkip = 0;
         }
     }
 
-    private void saveTsKv(Map<String, Object> row) {
+    private void saveTsKv(Map<String, Object> row, long position) {
         String entityType = (String) row.get("entity_type");
         UUID entityId = (UUID) row.get("entity_id");
         String key = (String) row.get("key");
@@ -91,7 +113,7 @@ public class CassandraTsKvImporter extends MigrationService {
                 query += " USING TTL " + ttl;
             }
             String finalQuery = query;
-            executor.submit(() -> {
+            submit(position, row, () -> {
                 cassandraService.execute(finalQuery, entityType, entityId, key, partition);
             });
         }
@@ -118,15 +140,40 @@ public class CassandraTsKvImporter extends MigrationService {
             query += " USING TTL " + ttl;
         }
         String finalQuery = query;
-        executor.submit(() -> {
+        submit(position, row, () -> {
             cassandraService.execute(finalQuery, row.values().toArray());
             reportProcessed(TS_KV_TABLE, row);
         });
     }
 
+    private void submit(long position, Map<String, Object> row, Runnable insert) {
+        executor.submit(() -> {
+            // rows after a failed one are imported on resume
+            if (position > firstFailedPosition.get()) {
+                return;
+            }
+            try {
+                insert.run();
+            } catch (Throwable e) {
+                onFailure(position, row, e);
+            }
+        });
+    }
+
+    private void onFailure(long position, Object row, Throwable e) {
+        failedInserts.incrementAndGet();
+        firstFailedPosition.accumulateAndGet(position, Math::min);
+        log.error("Failed to import time-series row at position {}: {}", position, row, e);
+    }
+
     @Override
     protected void afterFinished() throws Exception {
         finishedProcessing(TS_KV_TABLE);
+        if (failedInserts.get() > 0) {
+            long resumePosition = firstFailedPosition.get();
+            throw new IllegalStateException(failedInserts.get() + " time-series inserts failed, see errors above. " +
+                    "All rows before position " + resumePosition + " are imported: fix the cause and resume with CASSANDRA_IMPORT_TS_KV_SKIP_LINES=" + resumePosition);
+        }
     }
 
     @Data(staticConstructor = "of")

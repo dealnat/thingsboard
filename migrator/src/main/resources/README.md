@@ -87,6 +87,11 @@ Time-series files:
   The import reads both formats.
 - Extract each export into an empty working directory. If files of two exports are mixed (both `ts_kv_manifest.gz` and `ts_kv.gz`), the import fails.
 - `CASSANDRA_IMPORT_TS_KV_SKIP_LINES` counts rows across all files in order, like the processed counter in the import log. Fully skipped files are not read.
+- Timeouts and unavailable nodes are retried (`CASSANDRA_RETRY_MAX_RETRIES`, default 10), other errors such as an invalid query are not.
+  If an insert still fails, the import stops and exits with an error naming the `CASSANDRA_IMPORT_TS_KV_SKIP_LINES` value to resume from:
+  every row before it is imported. Rows imported again are overwritten, so resuming earlier is safe.
+- If Cassandra nodes crashed during the import (rather than becoming unreachable), writes they acknowledged since their last commit log sync
+  (`commitlog_sync_period`, 10s by default) can be lost when a single replica holds them. Resume from an earlier position or import again.
 - `data.tar` is limited to about 2GB, use `ARCHIVE_RESULT=false` for larger exports and transfer the files as they are.
 - For time-based slices instead of size-based ones, run exports with the `*_FILTER_START_TS` / `*_FILTER_END_TS` filters into separate working directories.
 
