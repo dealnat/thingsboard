@@ -47,6 +47,15 @@ class TsPartitioningTest {
     }
 
     @Test
+    void timestampsCloseToLongBoundsAreClamped() {
+        assertThat(TsPartitioning.MONTHS.toPartitionTs(Long.MIN_VALUE)).isEqualTo(Long.MIN_VALUE);
+        long lastPartition = TsPartitioning.MONTHS.toPartitionTs(Long.MAX_VALUE);
+        assertThat(lastPartition).isLessThan(Long.MAX_VALUE);
+        assertThat(TsPartitioning.MONTHS.nextPartitionTs(lastPartition)).isEqualTo(Long.MAX_VALUE);
+        assertThat(TsPartitioning.YEARS.nextPartitionTs(TsPartitioning.YEARS.toPartitionTs(Long.MAX_VALUE))).isEqualTo(Long.MAX_VALUE);
+    }
+
+    @Test
     void parse() {
         assertThat(TsPartitioning.parse("months")).isEqualTo(TsPartitioning.MONTHS);
         assertThat(TsPartitioning.parse(" INDEFINITE ")).isEqualTo(TsPartitioning.INDEFINITE);

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 package org.thingsboard.migrator.service.tenant.exporting;
 
+import com.zaxxer.hikari.HikariDataSource;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
@@ -12,9 +13,11 @@ import org.springframework.stereotype.Service;
 import org.thingsboard.migrator.MigrationService;
 import org.thingsboard.migrator.Table;
 import org.thingsboard.migrator.utils.TsKvWriter;
+import org.thingsboard.migrator.utils.TsKvWriterFactory;
 import org.thingsboard.migrator.utils.TsPartitioning;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +32,7 @@ import static org.thingsboard.migrator.utils.TsKvFiles.NAME;
 /**
  * Exports time-series history from PostgreSQL/TimescaleDB ts_kv in the CassandraTsKvExporter files format,
  * so that CassandraTsKvImporter can load it into a hybrid setup.
+ * History is read for the keys in the exported ts_kv_latest.
  */
 @Service
 @RequiredArgsConstructor
@@ -39,6 +43,7 @@ public class PostgresTsKvExporter extends MigrationService {
     private static final String[] VALUE_COLUMNS = {"bool_v", "str_v", "long_v", "dbl_v", "json_v"};
 
     private final JdbcTemplate jdbcTemplate;
+    private final TsKvWriterFactory writerFactory;
 
     @Value("${export.postgres_ts.partitioning}")
     private String partitioningName;
@@ -56,13 +61,12 @@ public class PostgresTsKvExporter extends MigrationService {
     private boolean cassandraExportEnabled;
     @Value("${skipped_tables}")
     private Set<Table> skippedTables;
-    @Value("${export.ts_kv.max_file_size_mb}")
-    private long maxFileSizeMb;
 
     private final AtomicLong failedKeys = new AtomicLong();
 
     private TsPartitioning partitioning;
-    private String query;
+    private String firstPageQuery;
+    private String nextPageQuery;
     private TsKvWriter writer;
 
     @PostConstruct
@@ -84,8 +88,17 @@ public class PostgresTsKvExporter extends MigrationService {
         } else if (!storage.exists(LATEST_KV)) {
             throw new IllegalStateException(LATEST_KV + ".gz not found in the working directory. Enable POSTGRES_EXPORT_ENABLED or put a previously exported " + LATEST_KV + ".gz there");
         }
-        query = "SELECT ts, bool_v, str_v, long_v, dbl_v, json_v FROM ts_kv WHERE entity_id = ? AND key = ? AND ts > ?" +
+        // Workers and the main thread (CallerRunsPolicy) query in parallel; waiting for a connection would time out
+        if (jdbcTemplate.getDataSource() instanceof HikariDataSource dataSource && dataSource.getMaximumPoolSize() <= parallelismLevel) {
+            throw new IllegalStateException("DATABASE_MAX_POOL_SIZE (" + dataSource.getMaximumPoolSize() +
+                    ") must be greater than PARALLELISM_LEVEL (" + parallelismLevel + ")");
+        }
+        // The key id is resolved by name: ts_kv_latest.gz may come from an earlier export
+        String query = "SELECT ts, bool_v, str_v, long_v, dbl_v, json_v FROM ts_kv " +
+                "WHERE entity_id = ? AND key = (SELECT key_id FROM key_dictionary WHERE key = ?) AND ts %s ?" +
                 (endTs != null ? " AND ts <= ?" : "") + " ORDER BY ts LIMIT ?";
+        firstPageQuery = query.formatted(">=");
+        nextPageQuery = query.formatted(">");
     }
 
     @Override
@@ -94,12 +107,12 @@ public class PostgresTsKvExporter extends MigrationService {
                 partitioning, startTs, endTs, storage.getFileInfo(LATEST_KV));
         reportTotal(LATEST_KV, storage.count(LATEST_KV));
 
-        writer = new TsKvWriter(storage, maxFileSizeMb * 1024 * 1024);
+        writer = writerFactory.create();
 
         storage.readAndProcess(LATEST_KV, latestKvRow -> executor.submit(() -> {
             try {
                 exportHistory(TsKey.of(latestKvRow));
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 failedKeys.incrementAndGet();
                 log.error("Failed to export time-series history for {} {}, key '{}'",
                         latestKvRow.get("table_name"), latestKvRow.get("entity_id"), latestKvRow.get("key_name"), e);
@@ -110,20 +123,23 @@ public class PostgresTsKvExporter extends MigrationService {
 
     private void exportHistory(TsKey tsKey) throws InterruptedException, IOException {
         // Keyset pagination: ts is unique per (entity_id, key)
-        long cursor = startTs != null ? startTs - 1 : Long.MIN_VALUE;
+        String query = firstPageQuery;
+        long cursor = startTs != null ? startTs : Long.MIN_VALUE;
         long partitionTs = Long.MIN_VALUE;
         long nextPartitionTs = Long.MIN_VALUE;
         while (true) {
-            Object[] args = endTs != null ?
-                    new Object[]{tsKey.entityId(), tsKey.keyId(), cursor, endTs, batchSize} :
-                    new Object[]{tsKey.entityId(), tsKey.keyId(), cursor, batchSize};
+            List<Object> args = new ArrayList<>(List.of(tsKey.entityId(), tsKey.keyName(), cursor));
+            if (endTs != null) {
+                args.add(endTs);
+            }
+            args.add(batchSize);
             List<TsRow> rows = jdbcTemplate.query(query, (rs, rowNum) -> {
                 Object[] values = new Object[VALUE_COLUMNS.length];
                 for (int i = 0; i < VALUE_COLUMNS.length; i++) {
                     values[i] = rs.getObject(i + 2);
                 }
                 return new TsRow(rs.getLong(1), values);
-            }, args);
+            }, args.toArray());
 
             for (TsRow row : rows) {
                 if (row.ts() < partitionTs || row.ts() >= nextPartitionTs) {
@@ -145,13 +161,14 @@ public class PostgresTsKvExporter extends MigrationService {
                 reportProcessed(NAME, data);
             }
 
-            if (rows.size() < batchSize) {
-                return;
-            }
-            cursor = rows.get(rows.size() - 1).ts();
             if (delayBetweenQueries > 0) {
                 TimeUnit.MILLISECONDS.sleep(delayBetweenQueries);
             }
+            if (rows.size() < batchSize) {
+                return;
+            }
+            query = nextPageQuery;
+            cursor = rows.get(rows.size() - 1).ts();
         }
     }
 
@@ -166,11 +183,10 @@ public class PostgresTsKvExporter extends MigrationService {
         writer.finish();
     }
 
-    private record TsKey(String entityType, UUID entityId, int keyId, String keyName) {
+    private record TsKey(String entityType, UUID entityId, String keyName) {
 
         static TsKey of(Map<String, Object> latestKvRow) {
-            return new TsKey((String) latestKvRow.get("table_name"), (UUID) latestKvRow.get("entity_id"),
-                    ((Number) latestKvRow.get("key")).intValue(), (String) latestKvRow.get("key_name"));
+            return new TsKey((String) latestKvRow.get("table_name"), (UUID) latestKvRow.get("entity_id"), (String) latestKvRow.get("key_name"));
         }
 
     }

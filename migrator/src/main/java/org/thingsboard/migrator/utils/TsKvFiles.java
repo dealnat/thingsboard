@@ -7,6 +7,7 @@ import java.io.Writer;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -31,7 +32,7 @@ public final class TsKvFiles {
     public record Part(String name, Long rows) {}
 
     static String partName(int index) {
-        return String.format("%s_%05d", NAME, index);
+        return String.format(Locale.ROOT, "%s_%05d", NAME, index);
     }
 
     static void writeManifest(Storage storage, List<Part> parts) throws IOException {
@@ -48,6 +49,11 @@ public final class TsKvFiles {
 
     public static List<Part> listForImport(Storage storage) throws IOException {
         if (storage.exists(MANIFEST)) {
+            // Extracting data.tar doesn't remove files of an earlier import in the same directory
+            if (storage.exists(NAME)) {
+                throw new IllegalStateException("Both " + MANIFEST + ".gz and " + NAME + ".gz found in the working directory, " +
+                        "one of them is left from another export. Remove the " + NAME + "*.gz files and extract the export again");
+            }
             List<Part> parts = new ArrayList<>();
             storage.readAndProcess(MANIFEST, row -> parts.add(new Part((String) row.get("file"), ((Number) row.get("rows")).longValue())));
             List<String> missing = parts.stream().map(Part::name).filter(name -> !storage.exists(name)).toList();

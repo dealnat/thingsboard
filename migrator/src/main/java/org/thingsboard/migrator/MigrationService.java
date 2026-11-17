@@ -31,7 +31,7 @@ public abstract class MigrationService {
     @Value("${stats_print_interval}")
     private int statsPrintInterval;
     @Value("${parallelism_level}")
-    private int parallelismLevel;
+    protected int parallelismLevel;
 
     protected final ConcurrentMap<String, Long> total = new ConcurrentHashMap<>();
     protected final ConcurrentMap<String, AtomicLong> processed = new ConcurrentHashMap<>();
@@ -57,7 +57,13 @@ public abstract class MigrationService {
     public final void run() throws Exception {
         // TODO: more logs on tenant
         log.info("Starting...");
-        start();
+        try {
+            start();
+        } catch (Throwable e) {
+            // Idle non-daemon workers would otherwise keep the JVM running
+            executor.shutdownNow();
+            throw e;
+        }
 
         executor.shutdown();
         executor.awaitTermination(Integer.MAX_VALUE, TimeUnit.SECONDS);

@@ -101,7 +101,10 @@ public class CassandraTsKvImporter extends MigrationService {
             row.put("long_v", ((Number) longV).longValue());
         }
         Object dblV = row.get("dbl_v");
-        if (dblV != null && !(dblV instanceof Double)) {
+        if (dblV instanceof String string) {
+            // NaN and Infinity are exported as strings
+            row.put("dbl_v", Double.parseDouble(string));
+        } else if (dblV != null && !(dblV instanceof Double)) {
             row.put("dbl_v", ((Number) dblV).doubleValue());
         }
         Number ts = (Number) row.get("ts");

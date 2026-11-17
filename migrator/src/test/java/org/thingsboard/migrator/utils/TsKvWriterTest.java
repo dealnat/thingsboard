@@ -5,13 +5,14 @@ package org.thingsboard.migrator.utils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.IOException;
+import java.io.Writer;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -32,10 +33,7 @@ class TsKvWriterTest {
 
     @BeforeEach
     void setUp() {
-        storage = new Storage();
-        ReflectionTestUtils.setField(storage, "workingDir", workingDir);
-        ReflectionTestUtils.setField(storage, "mode", "TENANT_DATA_EXPORT");
-        ReflectionTestUtils.setField(storage, "archiveResult", false);
+        storage = TestStorage.create(workingDir, "TENANT_DATA_EXPORT");
     }
 
     @Test
@@ -51,7 +49,7 @@ class TsKvWriterTest {
         assertThat(parts).extracting(TsKvFiles.Part::name).startsWith("ts_kv_00001", "ts_kv_00002");
         assertThat(parts.stream().mapToLong(TsKvFiles.Part::rows).sum()).isEqualTo(20_000);
         for (TsKvFiles.Part part : parts.subList(0, parts.size() - 1)) {
-            assertThat(storage.size(part.name())).isGreaterThanOrEqualTo(MAX_FILE_SIZE);
+            assertThat(storage.size(part.name())).isBetween(MAX_FILE_SIZE, MAX_FILE_SIZE + 64 * 1024);
         }
 
         List<Long> read = new ArrayList<>();
@@ -64,7 +62,7 @@ class TsKvWriterTest {
     }
 
     @Test
-    void concurrentWritesKeepLinesIntact() throws Exception {
+    void eachThreadWritesItsOwnFiles() throws Exception {
         TsKvWriter writer = new TsKvWriter(storage, MAX_FILE_SIZE);
         ExecutorService executor = Executors.newFixedThreadPool(8);
         List<Future<?>> futures = new ArrayList<>();
@@ -83,19 +81,26 @@ class TsKvWriterTest {
         executor.shutdown();
         writer.finish();
 
+        List<TsKvFiles.Part> parts = TsKvFiles.listForImport(storage);
+        assertThat(parts).extracting(TsKvFiles.Part::name).isSorted();
         List<Long> read = new ArrayList<>();
-        for (TsKvFiles.Part part : TsKvFiles.listForImport(storage)) {
-            read.addAll(readTs(part.name()));
+        for (TsKvFiles.Part part : parts) {
+            List<Long> partRows = readTs(part.name());
+            assertThat(partRows).hasSize(part.rows().intValue());
+            // rows of a file come from one thread, in its order
+            assertThat(partRows).isSorted();
+            assertThat(partRows.get(partRows.size() - 1) / 5_000).isEqualTo(partRows.get(0) / 5_000);
+            read.addAll(partRows);
         }
         assertThat(read).hasSize(40_000).doesNotHaveDuplicates();
     }
 
     @Test
-    void emptyExportHasManifestWithEmptyFile() throws IOException {
+    void emptyExportHasEmptyManifest() throws IOException {
         TsKvWriter writer = new TsKvWriter(storage, MAX_FILE_SIZE);
         writer.finish();
 
-        assertThat(TsKvFiles.listForImport(storage)).containsExactly(new TsKvFiles.Part("ts_kv_00001", 0L));
+        assertThat(TsKvFiles.listForImport(storage)).isEmpty();
     }
 
     @Test
@@ -116,14 +121,51 @@ class TsKvWriterTest {
     }
 
     @Test
-    void abortedExportIsRejectedByImport() throws IOException {
+    void abortDeletesAllFiles() throws IOException {
         TsKvWriter writer = new TsKvWriter(storage, MAX_FILE_SIZE);
+        for (int i = 0; i < 5_000; i++) {
+            writer.write(row(i));
+        }
+        writer.abort();
+
+        assertThat(storage.listFiles(TsKvFiles.ALL)).isEmpty();
+        assertThatThrownBy(() -> TsKvFiles.listForImport(storage)).hasMessageContaining("No time-series files");
+    }
+
+    @Test
+    void abortDeletesLegacyFile() throws IOException {
+        TsKvWriter writer = new TsKvWriter(storage, 0);
         writer.write(row(1));
         writer.abort();
+
+        assertThat(storage.listFiles(TsKvFiles.ALL)).isEmpty();
+        assertThatThrownBy(() -> TsKvFiles.listForImport(storage)).hasMessageContaining("No time-series files");
+    }
+
+    @Test
+    void filesWithoutManifestAreRejected() throws IOException {
+        // An export that crashed before finish()
+        TsKvWriter writer = new TsKvWriter(storage, MAX_FILE_SIZE);
+        writer.write(row(1));
 
         assertThatThrownBy(() -> TsKvFiles.listForImport(storage))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("didn't complete");
+    }
+
+    @Test
+    void manifestAndLegacyFileTogetherAreRejected() throws IOException {
+        TsKvWriter writer = new TsKvWriter(storage, MAX_FILE_SIZE);
+        writer.write(row(1));
+        writer.finish();
+        storage.newFile(TsKvFiles.NAME);
+        try (Writer legacy = storage.newWriter(TsKvFiles.NAME)) {
+            storage.addToFile(legacy, row(2));
+        }
+
+        assertThatThrownBy(() -> TsKvFiles.listForImport(storage))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("left from another export");
     }
 
     @Test
@@ -143,6 +185,17 @@ class TsKvWriterTest {
         assertThatThrownBy(() -> TsKvFiles.listForImport(storage))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("No time-series files");
+    }
+
+    @Test
+    void partNamesUseAsciiDigitsInAnyLocale() {
+        Locale defaultLocale = Locale.getDefault();
+        try {
+            Locale.setDefault(Locale.forLanguageTag("th-TH-u-nu-thai"));
+            assertThat(TsKvFiles.partName(12)).isEqualTo("ts_kv_00012");
+        } finally {
+            Locale.setDefault(defaultLocale);
+        }
     }
 
     private List<Long> readTs(String file) throws IOException {

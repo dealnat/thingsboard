@@ -22,6 +22,7 @@ import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -35,6 +36,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -66,19 +68,30 @@ public class Storage {
         Files.createDirectories(workingDir);
     }
 
-    public void newFile(String name) throws IOException {
+    // Synchronized: time-series exporters create files from worker threads
+    public synchronized void newFile(String name) throws IOException {
         Path file = getPath(name);
         Files.deleteIfExists(file);
         Files.createFile(file);
         createdFiles.add(file);
     }
 
-    @SneakyThrows
     public Writer newWriter(String file) {
+        return newWriter(file, null);
+    }
+
+    /**
+     * @param compressedSize if not null, tracks the number of compressed bytes the gzip stream has emitted
+     */
+    @SneakyThrows
+    public Writer newWriter(String file, AtomicLong compressedSize) {
         // The raw file
         FileOutputStream fos = new FileOutputStream(getPath(file).toFile());
         // Reducing disk IOPS
-        BufferedOutputStream bos = new BufferedOutputStream(fos, 128 * 1024);
+        OutputStream bos = new BufferedOutputStream(fos, 128 * 1024);
+        if (compressedSize != null) {
+            bos = new CountingOutputStream(bos, compressedSize);
+        }
         // Giving GZIP its own buffer allows the compression engine to work on large chunks of data at once.
         GZIPOutputStream gzos = new GZIPOutputStream(bos, 128 * 1024);
         // The UTF-8 Writer
@@ -118,8 +131,10 @@ public class Storage {
         return Files.size(getPath(file));
     }
 
-    public void delete(String file) throws IOException {
-        Files.deleteIfExists(getPath(file));
+    public synchronized void delete(String file) throws IOException {
+        Path path = getPath(file);
+        Files.deleteIfExists(path);
+        createdFiles.remove(path);
     }
 
     // Names without the .gz extension, sorted
@@ -206,6 +221,29 @@ public class Storage {
     private BufferedReader newReader(String file) throws IOException {
         FileInputStream fileInputStream = new FileInputStream(getPath(file).toFile());
         return new BufferedReader(new InputStreamReader(new GZIPInputStream(fileInputStream)));
+    }
+
+    private static class CountingOutputStream extends FilterOutputStream {
+
+        private final AtomicLong count;
+
+        CountingOutputStream(OutputStream out, AtomicLong count) {
+            super(out);
+            this.count = count;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            out.write(b);
+            count.incrementAndGet();
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            out.write(b, off, len);
+            count.addAndGet(len);
+        }
+
     }
 
     @SneakyThrows

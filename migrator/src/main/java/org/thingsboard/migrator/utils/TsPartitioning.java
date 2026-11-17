@@ -26,7 +26,7 @@ public enum TsPartitioning {
             case YEARS -> time.truncatedTo(ChronoUnit.DAYS).withDayOfYear(1);
             case INDEFINITE -> LocalDateTime.ofEpochSecond(0, 0, ZoneOffset.UTC);
         };
-        return partition.toInstant(ZoneOffset.UTC).toEpochMilli();
+        return toEpochMilli(partition);
     }
 
     public long nextPartitionTs(long partitionTs) {
@@ -42,7 +42,16 @@ public enum TsPartitioning {
             case YEARS -> time.plusYears(1);
             case INDEFINITE -> throw new IllegalStateException();
         };
-        return next.toInstant(ZoneOffset.UTC).toEpochMilli();
+        return toEpochMilli(next);
+    }
+
+    // Clamped, so that a sentinel ts close to Long.MIN_VALUE/MAX_VALUE doesn't fail the export
+    private static long toEpochMilli(LocalDateTime time) {
+        try {
+            return time.toInstant(ZoneOffset.UTC).toEpochMilli();
+        } catch (ArithmeticException e) {
+            return time.getYear() < 1970 ? Long.MIN_VALUE : Long.MAX_VALUE;
+        }
     }
 
     public static TsPartitioning parse(String name) {
