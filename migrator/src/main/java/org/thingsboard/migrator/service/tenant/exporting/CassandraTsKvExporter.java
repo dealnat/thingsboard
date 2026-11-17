@@ -5,6 +5,7 @@ package org.thingsboard.migrator.service.tenant.exporting;
 import com.datastax.oss.driver.api.core.cql.ColumnDefinition;
 import com.datastax.oss.driver.api.core.cql.ResultSet;
 import com.datastax.oss.driver.api.core.cql.Row;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
@@ -14,13 +15,16 @@ import org.thingsboard.migrator.MigrationService;
 import org.thingsboard.migrator.Table;
 import org.thingsboard.migrator.utils.CassandraService;
 import org.thingsboard.migrator.utils.Storage;
+import org.thingsboard.migrator.utils.TsKvWriter;
+import org.thingsboard.migrator.utils.TsKvWriterFactory;
 
-import java.io.Writer;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 @RequiredArgsConstructor
@@ -30,6 +34,7 @@ public class CassandraTsKvExporter extends MigrationService {
 
     private final Storage storage;
     private final CassandraService cassandraService;
+    private final TsKvWriterFactory writerFactory;
 
     @Value("${export.cassandra.ts.filter.start_ts:}")
     private Long startTs;
@@ -44,47 +49,48 @@ public class CassandraTsKvExporter extends MigrationService {
 
     public static final String TS_KV_TABLE = "ts_kv_cf";
     public static final String TS_KV_PARTITIONS_TABLE = "ts_kv_partitions_cf";
-    public static final String TS_KV_FILE = "ts_kv";
     public static final String LATEST_KV = Table.LATEST_KV.getName();
 
-    private Writer writer;
+    private final AtomicLong failedKeys = new AtomicLong();
+
+    private TsKvWriter writer;
 
     private boolean isFilterByPartition() {
         return partitionFilter != null && partitionFilter > 0;
+    }
+
+    @PostConstruct
+    private void validate() {
+        if (!isFilterByPartition() && startTs != null && endTs != null && startTs > endTs) {
+            throw new IllegalArgumentException("CASSANDRA_EXPORT_TS_FILTER_START_TS (" + startTs + ") is greater than CASSANDRA_EXPORT_TS_FILTER_END_TS (" + endTs + ")");
+        }
     }
 
     @Override
     protected void start() throws Exception {
         if (isFilterByPartition()) {
             log.info("Cassandra TS filter by partition [{}] is ACTIVE and other filters are IGNORED (startTs, endTs, partitionSizeMs).", partitionFilter);
-        } else {
-            // Validate time filter once at start
-            if (startTs != null && endTs != null && startTs > endTs) {
-                log.error("Invalid time range configuration: startTs {} is greater than endTs {}. Aborting Cassandra TS export.", startTs, endTs);
-                return;
-            }
-            if (startTs != null || endTs != null) {
-                log.info("Cassandra TS export filter is active. startTs={}, endTs={}, partitionSizeMs={}", startTs, endTs, partitionSizeMs);
-            }
+        } else if (startTs != null || endTs != null) {
+            log.info("Cassandra TS export filter is active. startTs={}, endTs={}, partitionSizeMs={}", startTs, endTs, partitionSizeMs);
         }
 
-        storage.newFile(TS_KV_FILE);
-        writer = storage.newWriter(TS_KV_FILE);
+        writer = writerFactory.create();
 
         log.info("Starting Cassandra TS export. Latest KV file info: {}", storage.getFileInfo(LATEST_KV));
         storage.readAndProcess(LATEST_KV, latestKvRow -> {
             executor.submit(() -> {
                 try {
                     getTsHistoryAndSave(latestKvRow);
-                    reportProcessed(LATEST_KV, latestKvRow);
-                } catch (Exception e) {
+                } catch (Throwable e) {
+                    failedKeys.incrementAndGet();
                     log.error("Failed to retrieve timeseries history for {}", latestKvRow, e);
                 }
+                reportProcessed(LATEST_KV, latestKvRow);
             });
         });
     }
 
-    private void getTsHistoryAndSave(Map<String, Object> latestKvRow) {
+    private void getTsHistoryAndSave(Map<String, Object> latestKvRow) throws IOException {
         String entityType = (String) latestKvRow.get("table_name");
         UUID entityId = (UUID) latestKvRow.get("entity_id");
         String key = (String) latestKvRow.get("key_name");
@@ -153,7 +159,7 @@ public class CassandraTsKvExporter extends MigrationService {
                     }
                     data.put(column, value);
                 }
-                storage.addToFile(writer, data);
+                writer.write(data);
                 reportProcessed(TS_KV_TABLE, data);
             }
         }
@@ -163,7 +169,11 @@ public class CassandraTsKvExporter extends MigrationService {
     protected void afterFinished() throws Exception {
         finishedProcessing(TS_KV_TABLE);
         finishedProcessing(LATEST_KV);
-        writer.close();
+        if (failedKeys.get() > 0) {
+            writer.abort();
+            throw new IllegalStateException(failedKeys.get() + " time-series keys failed to export, see errors above. The export is incomplete");
+        }
+        writer.finish();
     }
 
 }

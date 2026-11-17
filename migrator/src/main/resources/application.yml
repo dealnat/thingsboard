@@ -14,6 +14,10 @@ exit_after_finish: ${EXIT_AFTER_FINISH:true}
 
 export:
   tenant_id: ${EXPORTED_TENANT_ID:}
+  ts_kv:
+    # Time-series history is split into ts_kv_00001.gz, ts_kv_00002.gz, ... of about this compressed size,
+    # listed in ts_kv_manifest.gz. Older migrator versions can't import it: 0 writes a single ts_kv.gz, the format they read.
+    max_file_size_mb: ${TS_KV_EXPORT_MAX_FILE_SIZE_MB:256}
   postgres:
     enabled: ${POSTGRES_EXPORT_ENABLED:true}
     batch_size: ${POSTGRES_EXPORT_BATCH_SIZE:500}
@@ -38,6 +42,18 @@ export:
       order:
         # Enforce result order by ts in the query. Disabled by default because explicit ordering is not required for export and results may be returned in any order.
         ts: ${CASSANDRA_EXPORT_TS_ORDER_TS:false}
+  # Exports time-series history from PostgreSQL/TimescaleDB ts_kv into the same ts_kv file the Cassandra importer reads.
+  # Mutually exclusive with export.cassandra (CASSANDRA_EXPORT_ENABLED must be false).
+  postgres_ts:
+    enabled: ${POSTGRES_TS_EXPORT_ENABLED:false}
+    # Must equal TS_KV_PARTITIONING of the target cluster, otherwise imported history won't be readable.
+    # MINUTES, HOURS, DAYS, MONTHS, YEARS, INDEFINITE
+    partitioning: ${POSTGRES_TS_EXPORT_PARTITIONING:MONTHS}
+    batch_size: ${POSTGRES_TS_EXPORT_BATCH_SIZE:10000}
+    filter:
+      # Inclusive bounds in epoch millis. Leave empty to export all available data.
+      start_ts: ${POSTGRES_TS_EXPORT_FILTER_START_TS:}
+      end_ts: ${POSTGRES_TS_EXPORT_FILTER_END_TS:}
 
 import:
   postgres:
@@ -81,6 +97,10 @@ spring:
     url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/thingsboard}
     username: ${DATABASE_USERNAME:postgres}
     password: ${DATABASE_PASSWORD:postgres}
+    hikari:
+      # Must be greater than parallelism_level: worker threads and the caller thread query in parallel.
+      # The PostgreSQL time-series export checks it at startup.
+      maximum-pool-size: ${DATABASE_MAX_POOL_SIZE:16}
 
   cassandra:
     keyspace-name: ${CASSANDRA_KEYSPACE_NAME:thingsboard}

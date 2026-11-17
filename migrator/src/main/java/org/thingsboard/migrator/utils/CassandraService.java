@@ -2,10 +2,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 package org.thingsboard.migrator.utils;
 
+import com.datastax.oss.driver.api.core.connection.ClosedConnectionException;
+import com.datastax.oss.driver.api.core.connection.HeartbeatException;
 import com.datastax.oss.driver.api.core.cql.ResultSet;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.RecoverableDataAccessException;
+import org.springframework.dao.TransientDataAccessException;
 import org.springframework.data.cassandra.core.CassandraTemplate;
 import org.springframework.data.cassandra.core.cql.ArgumentPreparedStatementBinder;
 import org.springframework.data.cassandra.core.cql.CachedPreparedStatementCreator;
@@ -74,7 +79,13 @@ public class CassandraService {
                         activeErrors.decrementAndGet();
                     }
                 }
-            } catch (Exception e) {
+            } catch (RuntimeException e) {
+                if (!isRetryable(e)) {
+                    if (attempt > 0) {
+                        activeErrors.decrementAndGet();
+                    }
+                    throw e;
+                }
                 attempt++;
                 if (attempt == 1) {
                     activeErrors.incrementAndGet();
@@ -99,6 +110,15 @@ public class CassandraService {
                 }
             }
         }
+    }
+
+    // Retrying an invalid query, a type or codec error etc. can't succeed
+    static boolean isRetryable(Throwable e) {
+        return e instanceof TransientDataAccessException // timeouts, unavailable replicas, overloaded or bootstrapping node
+                || e instanceof DataAccessResourceFailureException // no node available, connection or replica write failures
+                || e instanceof RecoverableDataAccessException
+                // a connection closed with the request in flight
+                || e.getCause() instanceof ClosedConnectionException || e.getCause() instanceof HeartbeatException;
     }
 
     private void rateLimit() {
